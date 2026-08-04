@@ -352,6 +352,18 @@ export class GrafanaClient {
     return this.url;
   }
 
+  private buildDashboardV2Path(namespace: string, name: string): string {
+    return [
+      "apis",
+      "dashboard.grafana.app",
+      "v2beta1",
+      "namespaces",
+      encodeURIComponent(namespace),
+      "dashboards",
+      encodeURIComponent(name),
+    ].join("/");
+  }
+
   private async fetchWithTimeout(url: string, init: RequestInit, timeoutMs = 30_000): Promise<Response> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -440,15 +452,7 @@ export class GrafanaClient {
    * opaque, so fields unknown to this client are returned unchanged.
    */
   async getDashboardV2(namespace: string, name: string): Promise<DashboardV2Resource> {
-    const path = [
-      "apis",
-      "dashboard.grafana.app",
-      "v2beta1",
-      "namespaces",
-      encodeURIComponent(namespace),
-      "dashboards",
-      encodeURIComponent(name),
-    ].join("/");
+    const path = this.buildDashboardV2Path(namespace, name);
     const res = await this.fetchWithTimeout(`${this.baseUrl}/${path}`, {
       method: "GET",
       headers: this.headers,
@@ -460,6 +464,49 @@ export class GrafanaClient {
     }
 
     return (await res.json()) as DashboardV2Resource;
+  }
+
+  /**
+   * Replaces a Grafana V2 dashboard resource via the Kubernetes-style API.
+   *
+   * Sends the full resource body unchanged, then returns the authoritative
+   * server state via a raw V2 GET readback.
+   */
+  async replaceDashboardV2(
+    namespace: string,
+    name: string,
+    resource: DashboardV2Resource,
+  ): Promise<DashboardV2Resource> {
+    const resourceVersion = resource?.metadata?.resourceVersion;
+    if (typeof resourceVersion !== "string" || resourceVersion.trim() === "") {
+      throw new Error(
+        `Grafana V2 dashboard replace requires metadata.resourceVersion (${namespace}/${name})`,
+      );
+    }
+
+    if (resource?.status === undefined) {
+      throw new Error(`Grafana V2 dashboard replace requires status (${namespace}/${name})`);
+    }
+
+    if (resource?.metadata?.name !== name) {
+      throw new Error(
+        `Grafana V2 dashboard replace name mismatch: route uses '${name}' but resource metadata.name is '${String(resource?.metadata?.name)}'`,
+      );
+    }
+
+    const path = this.buildDashboardV2Path(namespace, name);
+    const res = await this.fetchWithTimeout(`${this.baseUrl}/${path}`, {
+      method: "PUT",
+      headers: this.headers,
+      body: JSON.stringify(resource),
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      throw this.classifyError(`replace V2 dashboard ${namespace}/${name}`, res.status, body);
+    }
+
+    return this.getDashboardV2(namespace, name);
   }
 
   /**
