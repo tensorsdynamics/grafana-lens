@@ -10,6 +10,16 @@
  * - Folders: create/list for organization
  */
 
+import type { DashboardV2Resource } from "./grafana-dashboard-v2-types.js";
+export type {
+  DashboardV2Metadata,
+  DashboardV2Resource,
+  DashboardV2Spec,
+  GrafanaDashboardV2,
+  GrafanaDashboardV2Metadata,
+  GrafanaDashboardV2Spec,
+} from "./grafana-dashboard-v2-types.js";
+
 export type GrafanaClientOptions = {
   url: string;
   apiKey: string;
@@ -421,6 +431,35 @@ export class GrafanaClient {
     }
 
     return (await res.json()) as Record<string, unknown>;
+  }
+
+  /**
+   * Reads a Grafana V2 dashboard resource by namespace and name.
+   *
+   * Only the Kubernetes-style item GET is implemented here. The V2 spec stays
+   * opaque, so fields unknown to this client are returned unchanged.
+   */
+  async getDashboardV2(namespace: string, name: string): Promise<DashboardV2Resource> {
+    const path = [
+      "apis",
+      "dashboard.grafana.app",
+      "v2beta1",
+      "namespaces",
+      encodeURIComponent(namespace),
+      "dashboards",
+      encodeURIComponent(name),
+    ].join("/");
+    const res = await this.fetchWithTimeout(`${this.baseUrl}/${path}`, {
+      method: "GET",
+      headers: this.headers,
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      throw this.classifyError(`get V2 dashboard ${namespace}/${name}`, res.status, body);
+    }
+
+    return (await res.json()) as DashboardV2Resource;
   }
 
   /**
