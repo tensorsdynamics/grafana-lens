@@ -71,7 +71,9 @@
     "build": "tsc",
     "prepack": "npm run build",
     "prepublishOnly": "npm run build && npm test -- --run",
+    "pretest": "node scripts/write-version.mjs",
     "test": "vitest",
+    "pretypecheck": "node scripts/write-version.mjs",
     "typecheck": "tsc --noEmit"
   },
   "repository": {
@@ -102,7 +104,7 @@
   },
   "devDependencies": {
     "ajv": "^8.18.0",
-    "openclaw": "*",
+    "openclaw": "2026.7.1-2",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   },
