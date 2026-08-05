@@ -1,4 +1,7 @@
+import _Ajv from "ajv";
 import { beforeEach, describe, expect, test, vi } from "vitest";
+
+const Ajv = (_Ajv as unknown as { default?: unknown }).default ?? _Ajv;
 
 // ── Hoisted mocks ────────────────────────────────────────────────────
 
@@ -158,12 +161,73 @@ describe("grafana_update_dashboard tool", () => {
     const tool = createUpdateDashboardToolFactory(makeRegistry())({} as never);
     const parameters = tool!.parameters as {
       required: string[];
-      properties: { operation: { enum: string[] }; audit: { type: string } };
+      properties: {
+        operation: { enum: string[] };
+        audit: { type: string };
+        layout: { type: string; additionalProperties?: boolean };
+      };
     };
 
     expect(parameters.required).toEqual(["operation"]);
     expect(parameters.properties.operation.enum).toContain("update_layout_v2");
     expect(parameters.properties.audit.type).toBe("boolean");
+    expect(parameters.properties.layout.type).toBe("object");
+    expect(parameters.properties.layout.additionalProperties).toBe(true);
+  });
+
+  test("declares layout schema as opaque so arbitrary V2 layout JSON is accepted", () => {
+    const tool = createUpdateDashboardToolFactory(makeRegistry())({} as never);
+    const parameters = tool!.parameters as {
+      type: "object";
+      properties: {
+        layout: { type: string; additionalProperties?: boolean };
+      };
+    };
+
+    expect(parameters.properties.layout).toMatchObject({
+      type: "object",
+      additionalProperties: true,
+    });
+
+    const ajv = new Ajv();
+    const validate = ajv.compile({
+      type: "object",
+      properties: {
+        layout: parameters.properties.layout,
+      },
+      required: ["layout"],
+      additionalProperties: false,
+    });
+
+    const sampleLayout = {
+      kind: "RowsLayout",
+      spec: {
+        rows: [
+          {
+            kind: "RowsLayoutRow",
+            spec: {
+              layout: {
+                kind: "TabsLayout",
+                spec: {
+                  tabs: [
+                    {
+                      kind: "TabsLayoutTab",
+                      spec: {
+                        title: "01 Overview",
+                        layout: { kind: "ElementReference", spec: { name: "overview" } },
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        ],
+      },
+    };
+
+    expect(validate({ layout: sampleLayout })).toBe(true);
+    expect(validate.errors).toBeNull();
   });
 
   // ── add_panel ──────────────────────────────────────────────────

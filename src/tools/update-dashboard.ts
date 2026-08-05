@@ -83,6 +83,7 @@ export function createUpdateDashboardToolFactory(registry: GrafanaClientRegistry
         },
         layout: {
           type: "object",
+          additionalProperties: true,
           description: "Grafana Dashboard API V2 layout object for update_layout_v2. Replaces only spec.layout.",
         },
         audit: {
