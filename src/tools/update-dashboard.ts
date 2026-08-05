@@ -1,11 +1,12 @@
 /**
  * grafana_update_dashboard tool
  *
- * Five operations in one tool:
+ * Six operations in one tool:
  *   - add_panel: Add a new panel with auto-layout + query validation
  *   - remove_panel: Remove a panel by ID or title
  *   - update_panel: Merge updates into an existing panel + query validation
  *   - update_metadata: Change title, description, tags, time range, refresh
+ *   - update_layout_v2: Replace only spec.layout on a Grafana Dashboard API V2 resource
  *   - delete: Permanently remove a dashboard
  *
  * Uses the same POST /api/dashboards/db endpoint as create-dashboard,
@@ -19,6 +20,7 @@
 import { jsonResult, readStringParam, readNumberParam } from "../sdk-compat.js";
 import { GrafanaClientRegistry } from "../grafana-client-registry.js";
 import type { GrafanaClient } from "../grafana-client.js";
+import { validateDashboardV2Layout } from "../grafana-dashboard-v2-layout.js";
 import { instanceProperties } from "./instance-param.js";
 
 type Panel = Record<string, unknown>;
@@ -52,9 +54,11 @@ export function createUpdateDashboardToolFactory(registry: GrafanaClientRegistry
       "Use operation 'add_panel' to append a panel (auto-layouts below existing panels).",
       "Use 'remove_panel' to delete a panel by ID or title. Use 'update_panel' to merge changes into a panel.",
       "Use 'update_metadata' to change title, description, tags, time range, or auto-refresh.",
+      "Use 'update_layout_v2' to replace only spec.layout on a Grafana Dashboard API V2 resource by namespace/name, with tab slug and ElementReference validation.",
       "Use 'delete' to permanently remove a dashboard (cannot be undone — confirm with user first).",
-      "Returns the updated dashboard URL and a summary of changes.",
+      "Returns the updated dashboard URL and a summary of changes for classic updates, or the raw V2 readback plus compact audit metadata for update_layout_v2.",
       "For add_panel and update_panel (when targets change), PromQL queries are dry-run and a queryValidation object is included: {valid, error?, sampleValue?} per target. The panel is always saved — validation is informational.",
+      "For update_layout_v2, pass namespace, name, and layout; audit defaults to true and returns compact tab slug / ElementReference checks.",
     ].join(" "),
     parameters: {
       type: "object" as const,
@@ -66,8 +70,24 @@ export function createUpdateDashboardToolFactory(registry: GrafanaClientRegistry
         },
         operation: {
           type: "string",
-          enum: ["add_panel", "remove_panel", "update_panel", "update_metadata", "delete"],
+          enum: ["add_panel", "remove_panel", "update_panel", "update_metadata", "update_layout_v2", "delete"],
           description: "Operation to perform on the dashboard",
+        },
+        namespace: {
+          type: "string",
+          description: "Grafana Dashboard API V2 namespace for update_layout_v2",
+        },
+        name: {
+          type: "string",
+          description: "Grafana Dashboard API V2 resource name for update_layout_v2",
+        },
+        layout: {
+          type: "object",
+          description: "Grafana Dashboard API V2 layout object for update_layout_v2. Replaces only spec.layout.",
+        },
+        audit: {
+          type: "boolean",
+          description: "Include compact V2 layout audit in the response. Default: true.",
         },
         panel: {
           type: "object",
@@ -105,12 +125,17 @@ export function createUpdateDashboardToolFactory(registry: GrafanaClientRegistry
           description: 'Auto-refresh interval (update_metadata). Example: "1m", "5m", "30s"',
         },
       },
-      required: ["uid", "operation"],
+      required: ["operation"],
     },
     async execute(_toolCallId: string, params: Record<string, unknown>) {
       const client = registry.get(readStringParam(params, "instance"));
-      const uid = readStringParam(params, "uid", { required: true, label: "Dashboard UID" });
       const operation = readStringParam(params, "operation", { required: true, label: "Operation" });
+
+      if (operation === "update_layout_v2") {
+        return handleUpdateLayoutV2(client, params);
+      }
+
+      const uid = readStringParam(params, "uid", { required: true, label: "Dashboard UID" });
 
       // Fetch existing dashboard — preserves id and version for update
       let data: Record<string, unknown>;
@@ -143,11 +168,15 @@ export function createUpdateDashboardToolFactory(registry: GrafanaClientRegistry
           return handleUpdatePanel(client, dashboard, meta, panels, params);
         case "update_metadata":
           return handleUpdateMetadata(client, dashboard, meta, params);
+        case "update_layout_v2":
+          return jsonResult({
+            error: "update_layout_v2 should be handled before classic dashboard fetch.",
+          });
         case "delete":
           return handleDelete(client, uid, dashboard);
         default:
           return jsonResult({
-            error: `Unknown operation '${operation}'. Use: add_panel, remove_panel, update_panel, update_metadata, delete`,
+            error: `Unknown operation '${operation}'. Use: add_panel, remove_panel, update_panel, update_metadata, update_layout_v2, delete`,
           });
       }
     },
@@ -402,7 +431,121 @@ async function handleDelete(
   }
 }
 
+async function handleUpdateLayoutV2(
+  client: GrafanaClient,
+  params: Record<string, unknown>,
+) {
+  let namespace: string;
+  let name: string;
+  let layout: unknown;
+  let includeAudit: boolean;
+
+  try {
+    namespace = readStringParam(params, "namespace", { required: true, label: "Namespace" });
+    name = readStringParam(params, "name", { required: true, label: "Name" });
+    layout = params.layout;
+    includeAudit = readBooleanParam(params, "audit", true);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return jsonResult({ error: `Invalid update_layout_v2 parameters: ${reason}` });
+  }
+
+  if (!isRecord(layout)) {
+    return jsonResult({
+      error: "update_layout_v2 requires a 'layout' object.",
+    });
+  }
+
+  let current: Awaited<ReturnType<GrafanaClient["getDashboardV2"]>>;
+  try {
+    current = await client.getDashboardV2(namespace, name);
+    assertFullDashboardV2Resource(current, namespace, name);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return jsonResult({ error: `Failed to get V2 dashboard: ${reason}` });
+  }
+
+  let validation;
+  try {
+    validation = validateDashboardV2Layout(layout, current.spec.elements);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return jsonResult({ error: `Invalid V2 dashboard layout: ${reason}` });
+  }
+
+  const next = deepClone(current);
+  next.spec.layout = deepClone(layout);
+
+  try {
+    const readback = await client.replaceDashboardV2(namespace, name, next);
+    return jsonResult({
+      status: "updated",
+      operation: "update_layout_v2",
+      namespace,
+      name,
+      beforeResourceVersion: current.metadata.resourceVersion,
+      afterResourceVersion: readback.metadata.resourceVersion,
+      ...(includeAudit ? { audit: validation.audit } : {}),
+      resource: readback,
+    });
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return jsonResult({ error: `Failed to update V2 dashboard layout: ${reason}` });
+  }
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readBooleanParam(
+  params: Record<string, unknown>,
+  key: string,
+  defaultValue: boolean,
+): boolean {
+  const value = params[key];
+  if (value === undefined) return defaultValue;
+  if (typeof value === "boolean") return value;
+  throw new Error(`${key} must be a boolean`);
+}
+
+function deepClone<T>(value: T): T {
+  if (typeof structuredClone === "function") return structuredClone(value);
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function assertFullDashboardV2Resource(
+  resource: unknown,
+  namespace: string,
+  name: string,
+): asserts resource is {
+  metadata: { name: string; resourceVersion: string };
+  spec: Record<string, unknown>;
+  status: unknown;
+} & Record<string, unknown> {
+  if (!isRecord(resource)) {
+    throw new Error(`Grafana V2 dashboard ${namespace}/${name} did not return an object resource.`);
+  }
+
+  const metadata = isRecord(resource.metadata) ? resource.metadata : undefined;
+  const spec = isRecord(resource.spec) ? resource.spec : undefined;
+  const resourceVersion = metadata?.resourceVersion;
+
+  if (!metadata || typeof metadata.name !== "string" || metadata.name !== name) {
+    throw new Error(`Grafana V2 dashboard ${namespace}/${name} is missing metadata.name=${JSON.stringify(name)}.`);
+  }
+  if (typeof resourceVersion !== "string" || resourceVersion.trim() === "") {
+    throw new Error(`Grafana V2 dashboard ${namespace}/${name} is missing metadata.resourceVersion.`);
+  }
+  if (!spec) {
+    throw new Error(`Grafana V2 dashboard ${namespace}/${name} is missing spec.`);
+  }
+  if (!("status" in resource) || resource.status === undefined) {
+    throw new Error(`Grafana V2 dashboard ${namespace}/${name} is missing status.`);
+  }
+}
 
 function findPanel(
   panels: Panel[],
