@@ -3,7 +3,9 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 // ── Hoisted mocks ────────────────────────────────────────────────────
 
 const getDashboardMock = vi.hoisted(() => vi.fn());
+const getDashboardV2Mock = vi.hoisted(() => vi.fn());
 const createDashboardMock = vi.hoisted(() => vi.fn());
+const replaceDashboardV2Mock = vi.hoisted(() => vi.fn());
 const deleteDashboardMock = vi.hoisted(() => vi.fn());
 const dashboardUrlMock = vi.hoisted(() => vi.fn((uid: string) => `http://localhost:3000/d/${uid}`));
 const queryPrometheusMock = vi.hoisted(() => vi.fn());
@@ -11,7 +13,9 @@ const queryPrometheusMock = vi.hoisted(() => vi.fn());
 vi.mock("../grafana-client.js", () => ({
   GrafanaClient: class {
     getDashboard = getDashboardMock;
+    getDashboardV2 = getDashboardV2Mock;
     createDashboard = createDashboardMock;
+    replaceDashboardV2 = replaceDashboardV2Mock;
     deleteDashboard = deleteDashboardMock;
     dashboardUrl = dashboardUrlMock;
     queryPrometheus = queryPrometheusMock;
@@ -92,15 +96,74 @@ function setupSaveMock() {
   });
 }
 
+function makeDashboardV2Resource(overrides?: {
+  metadata?: Record<string, unknown>;
+  spec?: Record<string, unknown>;
+  status?: unknown;
+  extras?: Record<string, unknown>;
+}) {
+  return {
+    apiVersion: "dashboard.grafana.app/v2beta1",
+    kind: "Dashboard",
+    metadata: {
+      name: "operations/dashboard",
+      resourceVersion: "rv-before-7",
+      uid: "uid-v2-1",
+      labels: { team: "platform" },
+      ...(overrides?.metadata ?? {}),
+    },
+    spec: {
+      title: "Operations",
+      elements: {
+        overview: { kind: "Panel", spec: { title: "Overview" } },
+        api: { kind: "Panel", spec: { title: "API" } },
+      },
+      layout: {
+        kind: "TabsLayout",
+        spec: {
+          tabs: [
+            {
+              kind: "TabsLayoutTab",
+              spec: {
+                title: "01 Overview",
+                layout: { kind: "ElementReference", spec: { name: "overview" } },
+              },
+            },
+          ],
+        },
+      },
+      opaqueSpec: { keep: true },
+      ...(overrides?.spec ?? {}),
+    },
+    status: overrides?.status ?? { phase: "Ready", syncedAt: "2026-08-04T07:00:00Z" },
+    opaqueTopLevel: { keep: true },
+    ...(overrides?.extras ?? {}),
+  };
+}
+
 // ── Tests ────────────────────────────────────────────────────────────
 
 describe("grafana_update_dashboard tool", () => {
   beforeEach(() => {
     getDashboardMock.mockReset();
+    getDashboardV2Mock.mockReset();
     createDashboardMock.mockReset();
+    replaceDashboardV2Mock.mockReset();
     deleteDashboardMock.mockReset();
     dashboardUrlMock.mockClear();
     queryPrometheusMock.mockReset();
+  });
+
+  test("publishes update_layout_v2 params with operation as the only required field", () => {
+    const tool = createUpdateDashboardToolFactory(makeRegistry())({} as never);
+    const parameters = tool!.parameters as {
+      required: string[];
+      properties: { operation: { enum: string[] }; audit: { type: string } };
+    };
+
+    expect(parameters.required).toEqual(["operation"]);
+    expect(parameters.properties.operation.enum).toContain("update_layout_v2");
+    expect(parameters.properties.audit.type).toBe("boolean");
   });
 
   // ── add_panel ──────────────────────────────────────────────────
@@ -351,6 +414,371 @@ describe("grafana_update_dashboard tool", () => {
     });
   });
 
+  // ── update_layout_v2 ───────────────────────────────────────────
+
+  describe("update_layout_v2", () => {
+    test("uses only V2 client methods, preserves opaque fields, and changes layout only", async () => {
+      const current = makeDashboardV2Resource({
+        status: { phase: "Ready", syncedAt: "2026-08-04T07:00:00Z" },
+      });
+      const readback = makeDashboardV2Resource({
+        metadata: { resourceVersion: "rv-after-8" },
+        spec: {
+          title: "Operations",
+          elements: current.spec.elements as Record<string, unknown>,
+          layout: {
+            kind: "RowsLayout",
+            spec: {
+              rows: [
+                {
+                  kind: "RowsLayoutRow",
+                  spec: {
+                    layout: {
+                      kind: "TabsLayout",
+                      spec: {
+                        tabs: [
+                          {
+                            kind: "TabsLayoutTab",
+                            spec: {
+                              title: "01 Обзор",
+                              layout: { kind: "ElementReference", spec: { name: "overview" } },
+                            },
+                          },
+                          {
+                            kind: "TabsLayoutTab",
+                            spec: {
+                              title: "02 API",
+                              layout: { kind: "ElementReference", spec: { name: "api" } },
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  },
+                },
+              ],
+            },
+          },
+          opaqueSpec: { keep: true },
+          serverOnlyField: { checksum: "abc123" },
+        },
+        status: { phase: "Ready", syncedAt: "2026-08-04T07:01:00Z" },
+        extras: { opaqueTopLevel: { keep: true }, observedGeneration: 9 },
+      });
+
+      getDashboardV2Mock.mockResolvedValueOnce(current);
+      replaceDashboardV2Mock.mockResolvedValueOnce(readback);
+
+      const layout = {
+        kind: "RowsLayout",
+        spec: {
+          rows: [
+            {
+              kind: "RowsLayoutRow",
+              spec: {
+                layout: {
+                  kind: "TabsLayout",
+                  spec: {
+                    tabs: [
+                      {
+                        kind: "TabsLayoutTab",
+                        spec: {
+                          title: "01 Обзор",
+                          layout: { kind: "ElementReference", spec: { name: "overview" } },
+                        },
+                      },
+                      {
+                        kind: "TabsLayoutTab",
+                        spec: {
+                          title: "02 API",
+                          layout: { kind: "ElementReference", spec: { name: "api" } },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          ],
+        },
+      };
+
+      const tool = createUpdateDashboardToolFactory(makeRegistry())({} as never);
+      const result = await tool!.execute("call-v2-layout-1", {
+        operation: "update_layout_v2",
+        namespace: "team/platform",
+        name: "operations/dashboard",
+        layout,
+      });
+
+      const parsed = parse(result);
+      expect(parsed.status).toBe("updated");
+      expect(parsed.operation).toBe("update_layout_v2");
+      expect(parsed.namespace).toBe("team/platform");
+      expect(parsed.name).toBe("operations/dashboard");
+      expect(parsed.beforeResourceVersion).toBe("rv-before-7");
+      expect(parsed.afterResourceVersion).toBe("rv-after-8");
+      expect(parsed.audit).toEqual({
+        layoutKind: "RowsLayout",
+        tabTitles: ["01 Обзор", "02 API"],
+        tabSlugs: ["01", "02-api"],
+        elementReferenceCount: 2,
+        missingElementReferences: [],
+        warnings: [],
+      });
+      expect(parsed.resource).toEqual(readback);
+
+      expect(getDashboardV2Mock).toHaveBeenCalledWith("team/platform", "operations/dashboard");
+      expect(replaceDashboardV2Mock).toHaveBeenCalledTimes(1);
+      const [namespaceArg, nameArg, payload] = replaceDashboardV2Mock.mock.calls[0];
+      expect(namespaceArg).toBe("team/platform");
+      expect(nameArg).toBe("operations/dashboard");
+      expect(payload).toEqual({
+        ...current,
+        spec: {
+          ...current.spec,
+          layout,
+        },
+      });
+      expect(payload).not.toBe(current);
+      expect(payload.spec).not.toBe(current.spec);
+      expect(payload.spec.layout).not.toBe(current.spec.layout);
+      expect(payload.opaqueTopLevel).toEqual({ keep: true });
+      expect(payload.spec.opaqueSpec).toEqual({ keep: true });
+      expect(payload.status).toEqual({ phase: "Ready", syncedAt: "2026-08-04T07:00:00Z" });
+
+      expect(getDashboardMock).not.toHaveBeenCalled();
+      expect(createDashboardMock).not.toHaveBeenCalled();
+      expect(dashboardUrlMock).not.toHaveBeenCalled();
+    });
+
+    test("supports audit=false while still using V2 update flow", async () => {
+      getDashboardV2Mock.mockResolvedValueOnce(makeDashboardV2Resource());
+      replaceDashboardV2Mock.mockResolvedValueOnce(makeDashboardV2Resource({
+        metadata: { resourceVersion: "rv-after-9" },
+      }));
+
+      const tool = createUpdateDashboardToolFactory(makeRegistry())({} as never);
+      const result = await tool!.execute("call-v2-layout-2", {
+        operation: "update_layout_v2",
+        namespace: "team/platform",
+        name: "operations/dashboard",
+        audit: false,
+        layout: {
+          kind: "TabsLayout",
+          spec: {
+            tabs: [
+              {
+                kind: "TabsLayoutTab",
+                spec: {
+                  title: "01 Overview",
+                  layout: { kind: "ElementReference", spec: { name: "overview" } },
+                },
+              },
+            ],
+          },
+        },
+      });
+
+      const parsed = parse(result);
+      expect(parsed.status).toBe("updated");
+      expect(parsed.audit).toBeUndefined();
+      expect(getDashboardMock).not.toHaveBeenCalled();
+      expect(createDashboardMock).not.toHaveBeenCalled();
+    });
+
+    test("returns parameter errors for missing namespace/name/layout", async () => {
+      const tool = createUpdateDashboardToolFactory(makeRegistry())({} as never);
+
+      const missingNamespace = parse(await tool!.execute("call-v2-layout-3", {
+        operation: "update_layout_v2",
+        name: "operations/dashboard",
+        layout: { kind: "TabsLayout", spec: { tabs: [] } },
+      }));
+      expect(missingNamespace.error).toContain("Invalid update_layout_v2 parameters");
+      expect(missingNamespace.error).toContain("Namespace");
+
+      const missingName = parse(await tool!.execute("call-v2-layout-3b", {
+        operation: "update_layout_v2",
+        namespace: "team/platform",
+        layout: { kind: "TabsLayout", spec: { tabs: [] } },
+      }));
+      expect(missingName.error).toContain("Invalid update_layout_v2 parameters");
+      expect(missingName.error).toContain("Name");
+
+      const missingLayout = parse(await tool!.execute("call-v2-layout-4", {
+        operation: "update_layout_v2",
+        namespace: "team/platform",
+        name: "operations/dashboard",
+      }));
+      expect(missingLayout.error).toContain("layout");
+
+      expect(getDashboardV2Mock).not.toHaveBeenCalled();
+      expect(replaceDashboardV2Mock).not.toHaveBeenCalled();
+    });
+
+    test("rejects incomplete fetched V2 resource before replace", async () => {
+      getDashboardV2Mock.mockResolvedValueOnce({
+        apiVersion: "dashboard.grafana.app/v2beta1",
+        kind: "Dashboard",
+        metadata: { name: "operations/dashboard", resourceVersion: "rv-before-7" },
+        spec: { elements: {}, layout: { kind: "TabsLayout", spec: { tabs: [] } } },
+      });
+
+      const tool = createUpdateDashboardToolFactory(makeRegistry())({} as never);
+      const result = await tool!.execute("call-v2-layout-5", {
+        operation: "update_layout_v2",
+        namespace: "team/platform",
+        name: "operations/dashboard",
+        layout: { kind: "TabsLayout", spec: { tabs: [] } },
+      });
+
+      const parsed = parse(result);
+      expect(parsed.error).toContain("Failed to get V2 dashboard");
+      expect(parsed.error).toContain("missing status");
+      expect(replaceDashboardV2Mock).not.toHaveBeenCalled();
+    });
+
+    test("rejects bad nested TabsLayout slugs", async () => {
+      getDashboardV2Mock.mockResolvedValueOnce(makeDashboardV2Resource());
+
+      const tool = createUpdateDashboardToolFactory(makeRegistry())({} as never);
+      const result = await tool!.execute("call-v2-layout-6", {
+        operation: "update_layout_v2",
+        namespace: "team/platform",
+        name: "operations/dashboard",
+        layout: {
+          kind: "RowsLayout",
+          spec: {
+            rows: [
+              {
+                kind: "RowsLayoutRow",
+                spec: {
+                  layout: {
+                    kind: "TabsLayout",
+                    spec: {
+                      tabs: [{ kind: "TabsLayoutTab", spec: { title: "Обзор" } }],
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        },
+      });
+
+      const parsed = parse(result);
+      expect(parsed.error).toContain("Invalid V2 dashboard layout");
+      expect(parsed.error).toContain("01 Обзор");
+      expect(parsed.error).toContain("$layout.spec.rows[0].spec.layout.spec.tabs[0].spec.title");
+      expect(replaceDashboardV2Mock).not.toHaveBeenCalled();
+      expect(createDashboardMock).not.toHaveBeenCalled();
+    });
+
+    test("rejects duplicate nested TabsLayout ASCII slugs", async () => {
+      getDashboardV2Mock.mockResolvedValueOnce(makeDashboardV2Resource());
+
+      const tool = createUpdateDashboardToolFactory(makeRegistry())({} as never);
+      const result = await tool!.execute("call-v2-layout-6b", {
+        operation: "update_layout_v2",
+        namespace: "team/platform",
+        name: "operations/dashboard",
+        layout: {
+          kind: "RowsLayout",
+          spec: {
+            rows: [
+              {
+                kind: "RowsLayoutRow",
+                spec: {
+                  layout: {
+                    kind: "TabsLayout",
+                    spec: {
+                      tabs: [
+                        { kind: "TabsLayoutTab", spec: { title: "Overview API" } },
+                        { kind: "TabsLayoutTab", spec: { title: "overview-api" } },
+                      ],
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        },
+      });
+
+      const parsed = parse(result);
+      expect(parsed.error).toContain("Invalid V2 dashboard layout");
+      expect(parsed.error).toContain("both slugify to \"overview-api\"");
+      expect(parsed.error).toContain("$layout.spec.rows[0].spec.layout.spec.tabs[0].spec.title");
+      expect(parsed.error).toContain("$layout.spec.rows[0].spec.layout.spec.tabs[1].spec.title");
+      expect(replaceDashboardV2Mock).not.toHaveBeenCalled();
+    });
+
+    test("rejects missing ElementReference targets", async () => {
+      getDashboardV2Mock.mockResolvedValueOnce(makeDashboardV2Resource());
+
+      const tool = createUpdateDashboardToolFactory(makeRegistry())({} as never);
+      const result = await tool!.execute("call-v2-layout-7", {
+        operation: "update_layout_v2",
+        namespace: "team/platform",
+        name: "operations/dashboard",
+        layout: {
+          kind: "TabsLayout",
+          spec: {
+            tabs: [
+              {
+                kind: "TabsLayoutTab",
+                spec: {
+                  title: "01 Missing",
+                  layout: { kind: "ElementReference", spec: { name: "does-not-exist" } },
+                },
+              },
+            ],
+          },
+        },
+      });
+
+      const parsed = parse(result);
+      expect(parsed.error).toContain("Invalid V2 dashboard layout");
+      expect(parsed.error).toContain("does-not-exist");
+      expect(replaceDashboardV2Mock).not.toHaveBeenCalled();
+    });
+
+    test("surfaces V2 replace conflicts", async () => {
+      getDashboardV2Mock.mockResolvedValueOnce(makeDashboardV2Resource());
+      replaceDashboardV2Mock.mockRejectedValueOnce(
+        new Error("Resource already exists (replace V2 dashboard team/platform/operations/dashboard)"),
+      );
+
+      const tool = createUpdateDashboardToolFactory(makeRegistry())({} as never);
+      const result = await tool!.execute("call-v2-layout-8", {
+        operation: "update_layout_v2",
+        namespace: "team/platform",
+        name: "operations/dashboard",
+        layout: {
+          kind: "TabsLayout",
+          spec: {
+            tabs: [
+              {
+                kind: "TabsLayoutTab",
+                spec: {
+                  title: "01 Overview",
+                  layout: { kind: "ElementReference", spec: { name: "overview" } },
+                },
+              },
+            ],
+          },
+        },
+      });
+
+      const parsed = parse(result);
+      expect(parsed.error).toContain("Failed to update V2 dashboard layout");
+      expect(parsed.error).toContain("Resource already exists");
+      expect(getDashboardMock).not.toHaveBeenCalled();
+      expect(createDashboardMock).not.toHaveBeenCalled();
+    });
+  });
+
   // ── Safety ─────────────────────────────────────────────────────
 
   describe("safety", () => {
@@ -367,6 +795,27 @@ describe("grafana_update_dashboard tool", () => {
       const parsed = parse(result);
       expect(parsed.error).toContain("provisioned");
       expect(createDashboardMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("classic regression", () => {
+    test("classic operations still use classic dashboard APIs, not V2", async () => {
+      getDashboardMock.mockResolvedValueOnce(makeDashboardResponse());
+      setupSaveMock();
+
+      const tool = createUpdateDashboardToolFactory(makeRegistry())({} as never);
+      const result = await tool!.execute("call-classic-regression", {
+        uid: "dash-1",
+        operation: "update_metadata",
+        title: "Classic Title",
+      });
+
+      const parsed = parse(result);
+      expect(parsed.status).toBe("updated");
+      expect(getDashboardMock).toHaveBeenCalledWith("dash-1");
+      expect(createDashboardMock).toHaveBeenCalledTimes(1);
+      expect(getDashboardV2Mock).not.toHaveBeenCalled();
+      expect(replaceDashboardV2Mock).not.toHaveBeenCalled();
     });
   });
 
