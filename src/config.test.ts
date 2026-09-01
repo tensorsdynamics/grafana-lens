@@ -1,5 +1,8 @@
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { readdirSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import _Ajv from "ajv";
 // AJV is CJS — under NodeNext, default export wraps the module namespace
 const Ajv = _Ajv.default;
@@ -310,8 +313,162 @@ describe("manifest schema", () => {
     expect(validate.errors?.[0]?.keyword).toBe("additionalProperties");
   });
 
+  test("SecretRef is accepted for legacy apiKey", () => {
+    expect(validate({
+      grafana: {
+        url: "http://localhost:3000",
+        apiKey: { source: "env", provider: "default", id: "GRAFANA_API_KEY" },
+      },
+    })).toBe(true);
+  });
+
+  test("SecretRef is accepted for all three named instances", () => {
+    expect(validate({
+      grafana: {
+        instances: [
+          { name: "monitoring", url: "http://monitoring:3000", apiKey: { source: "env", provider: "default", id: "FIXTURE_MONITORING_KEY" } },
+          { name: "xvision", url: "http://xvision:3000", apiKey: { source: "env", provider: "default", id: "GRAFANA_XVISION_KEY" } },
+          { name: "xvision2", url: "http://xvision2:3000", apiKey: { source: "env", provider: "default", id: "FIXTURE_XVISION2_KEY" } },
+        ],
+        default: "monitoring",
+      },
+    })).toBe(true);
+  });
+
+  test("unresolved SecretRef is rejected before client registration", () => {
+    const config = parseConfig({
+      grafana: {
+        url: "http://localhost:3000",
+        apiKey: { source: "env", provider: "default", id: "GRAFANA_MISSING_KEY" },
+      },
+    });
+    const result = validateConfig(config);
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(result.errors).toEqual([
+        "grafana.apiKey SecretRef could not be resolved before plugin activation.",
+      ]);
+      expect(result.errors.join(" ")).not.toContain("GRAFANA_MISSING_KEY");
+    }
+  });
+
+  test.each(["monitoring", "xvision", "xvision2"])(
+    "unresolved SecretRef for named instance %s is rejected before client registration",
+    (defaultInstance) => {
+      const config = parseConfig({
+        grafana: {
+          instances: [
+            { name: "monitoring", url: "http://monitoring:3000", apiKey: "fixture-monitoring" },
+            { name: "xvision", url: "http://xvision:3000", apiKey: "fixture-xvision" },
+            { name: "xvision2", url: "http://xvision2:3000", apiKey: "fixture-xvision2" },
+          ].map((instance) => instance.name === defaultInstance
+            ? { ...instance, apiKey: { source: "env" as const, provider: "default", id: "FIXTURE_MISSING_KEY" } }
+            : instance),
+          default: defaultInstance,
+        },
+      });
+      const result = validateConfig(config);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.errors).toEqual([
+          `grafana.instances.${defaultInstance}.apiKey SecretRef could not be resolved before plugin activation.`,
+        ]);
+        expect(result.errors.join(" ")).not.toContain("FIXTURE_MISSING_KEY");
+      }
+    },
+  );
+
   test("wrong types rejected (url: 123 in legacy)", () => {
     expect(validate({ grafana: { url: 123 } })).toBe(false);
+  });
+
+  test("declares both legacy and named SecretRef paths for OpenClaw runtime materialization", () => {
+    expect(manifest.configContracts?.secretInputs?.paths).toEqual([
+      { path: "grafana.apiKey", expected: "string" },
+      { path: "grafana.instances.*.apiKey", expected: "string" },
+    ]);
+  });
+});
+
+describe("OpenClaw SecretRef contract integration", () => {
+  type ContractPath = { path: string; expected?: "string" };
+  type ManifestModule = {
+    loadPluginManifest?: (rootDir: string) => { ok: boolean; manifest?: { configContracts?: { secretInputs?: { paths: ContractPath[] } } }; error?: string };
+    i?: ManifestModule["loadPluginManifest"];
+  };
+  type MatcherModule = {
+    collectPluginConfigContractMatches?: (params: { root: Record<string, unknown>; pathPattern: string }) => Array<{ path: string; value: unknown }>;
+    t?: MatcherModule["collectPluginConfigContractMatches"];
+  };
+
+  async function loadOpenClawInternal<T>(prefix: string): Promise<T> {
+    const openClawDist = dirname(createRequire(import.meta.url).resolve("openclaw"));
+    const moduleName = readdirSync(openClawDist).find(
+      (entry) => entry.startsWith(prefix) && entry.endsWith(".js"),
+    );
+    if (!moduleName) throw new Error(`OpenClaw helper ${prefix}*.js was not found`);
+    return (await import(pathToFileURL(resolve(openClawDist, moduleName)).href)) as T;
+  }
+
+  test("OpenClaw manifest loader and contract matcher discover full plugin paths", async () => {
+    const manifestModule = await loadOpenClawInternal<ManifestModule>("manifest-");
+    const loadPluginManifest = manifestModule.loadPluginManifest ?? manifestModule.i;
+    expect(loadPluginManifest).toBeTypeOf("function");
+    const loaded = loadPluginManifest!(resolve(import.meta.dirname, ".."));
+    expect(loaded.ok, loaded.error).toBe(true);
+    const paths = loaded.manifest?.configContracts?.secretInputs?.paths;
+    expect(paths).toEqual([
+      { path: "grafana.apiKey", expected: "string" },
+      { path: "grafana.instances.*.apiKey", expected: "string" },
+    ]);
+
+    const matcherModule = await loadOpenClawInternal<MatcherModule>("config-contract-matches-");
+    const collectMatches = matcherModule.collectPluginConfigContractMatches ?? matcherModule.t;
+    expect(collectMatches).toBeTypeOf("function");
+    const fullConfig = {
+      plugins: {
+        entries: {
+          "openclaw-grafana-lens": {
+            config: {
+              grafana: {
+                url: "http://fixture-monitoring:3000",
+                apiKey: { source: "env", provider: "fixture", id: "FIXTURE_LEGACY_KEY" },
+                instances: [
+                  { name: "monitoring", url: "http://fixture-monitoring:3000", apiKey: { source: "env", provider: "fixture", id: "FIXTURE_MONITORING_KEY" } },
+                  { name: "xvision", url: "http://fixture-xvision:3000", apiKey: { source: "env", provider: "fixture", id: "FIXTURE_XVISION_KEY" } },
+                  { name: "xvision2", url: "http://fixture-xvision2:3000", apiKey: { source: "env", provider: "fixture", id: "FIXTURE_XVISION2_KEY" } },
+                ],
+                default: "monitoring",
+              },
+            },
+          },
+        },
+      },
+    };
+    const pluginConfig = fullConfig.plugins.entries["openclaw-grafana-lens"].config;
+    const discovered = paths!.flatMap(({ path }) =>
+      collectMatches!({ root: pluginConfig, pathPattern: path }).map((match) => ({
+        path: `plugins.entries.openclaw-grafana-lens.config.${match.path}`,
+        value: match.value,
+      })),
+    );
+    expect(discovered.map(({ path }) => path)).toEqual([
+      "plugins.entries.openclaw-grafana-lens.config.grafana.apiKey",
+      "plugins.entries.openclaw-grafana-lens.config.grafana.instances[0].apiKey",
+      "plugins.entries.openclaw-grafana-lens.config.grafana.instances[1].apiKey",
+      "plugins.entries.openclaw-grafana-lens.config.grafana.instances[2].apiKey",
+    ]);
+    expect(discovered.every(({ value }) => typeof value === "object")).toBe(true);
+    expect(discovered.map(({ value }) => (value as { id: string }).id)).toEqual([
+      "FIXTURE_LEGACY_KEY",
+      "FIXTURE_MONITORING_KEY",
+      "FIXTURE_XVISION_KEY",
+      "FIXTURE_XVISION2_KEY",
+    ]);
+
+    // The old root-relative paths must not match this complete plugin config.
+    expect(collectMatches!({ root: pluginConfig, pathPattern: "apiKey" })).toEqual([]);
+    expect(collectMatches!({ root: pluginConfig, pathPattern: "instances.*.apiKey" })).toEqual([]);
   });
 });
 

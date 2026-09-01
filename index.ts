@@ -68,6 +68,10 @@ const plugin = {
 
   register(api: OpenClawPluginApi) {
     // ── Parse plugin config (never throws — credentials may be missing) ──
+    // OpenClaw's startup secrets runtime materializes manifest-declared
+    // configContracts.secretInputs before invoking register(). This keeps the
+    // registry's client construction synchronous while allowing apiKey to be a
+    // legacy string or SecretRef in source configuration.
     const config = parseConfig(api.pluginConfig);
     if (config._warnings) {
       for (const w of config._warnings) api.logger.warn(`grafana-lens: ${w}`);
