@@ -16,13 +16,14 @@
 
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
+import type { SecretInput } from "openclaw/plugin-sdk/secret-input";
 
 // ── Grafana instance types ────────────────────────────────────────────
 
 /** A single Grafana instance (parsed — fields may still be missing). */
 export type GrafanaInstanceConfig = {
   url?: string;
-  apiKey?: string;
+  apiKey?: SecretInput;
   orgId?: number;
 };
 
@@ -116,10 +117,19 @@ export function validateConfig(
       "grafana.url is required. Set it in plugin config or via GRAFANA_URL environment variable.",
     );
   }
+  const defaultApiKeyPath =
+    defaultInstance === "default"
+      ? "grafana.apiKey"
+      : `grafana.instances.${defaultInstance}.apiKey`;
   if (!defaultInst.apiKey) {
     errors.push(
-      "grafana.apiKey is required. Set it in plugin config or via GRAFANA_SERVICE_ACCOUNT_TOKEN environment variable.",
+      `${defaultApiKeyPath} is required. Set it in plugin config or via GRAFANA_SERVICE_ACCOUNT_TOKEN environment variable.`,
     );
+  } else if (typeof defaultInst.apiKey !== "string") {
+    // A SecretRef should have been materialized by OpenClaw's startup secret
+    // runtime before plugin registration. Never pass an unresolved ref (or any
+    // other object) to GrafanaClient as if it were a usable API key.
+    errors.push(`${defaultApiKeyPath} SecretRef could not be resolved before plugin activation.`);
   }
   if (errors.length > 0) {
     return { valid: false, errors };
@@ -128,7 +138,7 @@ export function validateConfig(
   // Keep only instances that have both url + apiKey. Default is guaranteed valid above.
   const validInstances: Record<string, ValidatedGrafanaInstanceConfig> = {};
   for (const [name, inst] of Object.entries(instances)) {
-    if (inst.url && inst.apiKey) {
+    if (typeof inst.url === "string" && typeof inst.apiKey === "string" && inst.url && inst.apiKey) {
       validInstances[name] = { url: inst.url, apiKey: inst.apiKey, orgId: inst.orgId };
     }
   }
@@ -195,13 +205,30 @@ function isMultiInstanceFormat(grafana: Record<string, unknown>): boolean {
   return Array.isArray(grafana.instances);
 }
 
+/** Keep SecretRef shape opaque until OpenClaw's runtime SecretRef materializer runs. */
+function isSecretRef(value: unknown): value is Exclude<SecretInput, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const ref = value as Record<string, unknown>;
+  return (
+    (ref.source === "env" || ref.source === "file" || ref.source === "exec") &&
+    typeof ref.provider === "string" &&
+    ref.provider.length > 0 &&
+    typeof ref.id === "string" &&
+    ref.id.length > 0
+  );
+}
+
+function isSecretInput(value: unknown): value is SecretInput {
+  return typeof value === "string" || isSecretRef(value);
+}
+
 /** Parse a single Grafana instance from raw config, applying env var fallback for the default. */
 function parseSingleInstance(
   raw: Record<string, unknown>,
   applyEnvFallback: boolean,
 ): GrafanaInstanceConfig {
-  let url = raw.url as string | undefined;
-  let apiKey = raw.apiKey as string | undefined;
+  let url = typeof raw.url === "string" ? raw.url : undefined;
+  let apiKey = isSecretInput(raw.apiKey) ? raw.apiKey : undefined;
 
   if (applyEnvFallback) {
     url = url ?? process.env.GRAFANA_URL;

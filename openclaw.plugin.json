@@ -44,8 +44,32 @@
                 "default": "http://localhost:3000"
               },
               "apiKey": {
-                "type": "string",
-                "description": "Grafana service account token (glsa_...)"
+                "description": "Grafana service account token (glsa_...) or SecretRef",
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "source": {
+                        "type": "string",
+                        "enum": ["env", "file", "exec"]
+                      },
+                      "provider": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "id": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required": ["source", "provider", "id"]
+                  }
+                ]
               },
               "orgId": {
                 "type": "number",
@@ -74,8 +98,32 @@
                       "description": "Grafana instance URL"
                     },
                     "apiKey": {
-                      "type": "string",
-                      "description": "Grafana service account token (glsa_...)"
+                      "description": "Grafana service account token (glsa_...) or SecretRef",
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "properties": {
+                            "source": {
+                              "type": "string",
+                              "enum": ["env", "file", "exec"]
+                            },
+                            "provider": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "id": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": ["source", "provider", "id"]
+                        }
+                      ]
                     },
                     "orgId": {
                       "type": "number",
@@ -274,6 +322,20 @@
           }
         }
       }
+    }
+  },
+  "configContracts": {
+    "secretInputs": {
+      "paths": [
+        {
+          "path": "grafana.apiKey",
+          "expected": "string"
+        },
+        {
+          "path": "grafana.instances.*.apiKey",
+          "expected": "string"
+        }
+      ]
     }
   },
   "uiHints": {
